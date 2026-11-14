@@ -1023,7 +1023,6 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 				continue
 			}
 
-
 			candidateCtx := ctx
 			var seatBudgetMs int
 			if settings != nil {
@@ -1265,7 +1264,11 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 							break
 						}
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							flag := 0
+							if picked != nil {
+								flag = picked.IgnoreUsageLimits
+							}
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, flag, ue)
 						}
 						if ue.StatusCode == http.StatusServiceUnavailable || ue.StatusCode == http.StatusBadGateway || ue.StatusCode == http.StatusGatewayTimeout {
 							// In combo loops, fail over immediately to the next connection/model without blocking the client turn
@@ -1490,7 +1493,6 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 				continue
 			}
 
-
 			candidateCtx := ctx
 			candidateWriter := http.ResponseWriter(cw)
 			// See the chat loop: the candidate tried last keeps the global deadline.
@@ -1700,7 +1702,11 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 							break
 						}
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							flag := 0
+							if picked != nil {
+								flag = picked.IgnoreUsageLimits
+							}
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, flag, ue)
 						}
 						if ue.StatusCode == http.StatusServiceUnavailable || ue.StatusCode == http.StatusBadGateway || ue.StatusCode == http.StatusGatewayTimeout {
 							// In combo loops, fail over immediately to the next connection/model without blocking the client turn
@@ -1850,7 +1856,7 @@ func entryExcludes(excludeIDs, tried []string) []string {
 // combo models on the same account, and Google rate-limited it forever. The
 // connection is also appended to excludeIDs so the remaining combo models in
 // this request skip it instead of re-hitting the same quota bucket.
-func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]string, connID, provider, model string, ue *upstreamError) {
+func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]string, connID, provider, model string, ignoreUsageLimits int, ue *upstreamError) {
 	if handlerutil.IsProbeContext(ctx) {
 		*excludeIDs = append(*excludeIDs, connID)
 		return
@@ -1866,6 +1872,16 @@ func (h *ChatHandler) comboLockRetryable(ctx context.Context, excludeIDs *[]stri
 	if isOpencodeFreeTierRefusal(provider, ue) {
 		*excludeIDs = append(*excludeIDs, connID)
 		log.Warn("combo", "opencode free-tier refusal, not locking the account",
+			"provider", provider, "model", model, "conn", connID, "status", ue.StatusCode)
+		return
+	}
+	// PRD: Ignore Usage Limits. A flagged connection is never parked on a
+	// 402/429 quota refusal and is not removed from the rotation for this
+	// pass — the retry loop owns the account, every other combo member must go
+	// on trying it. Deliberately no isCustomJSONConn gate here: a custom JSON
+	// business attempt is handled as terminal before comboLockRetryable runs.
+	if providers.IgnoreUsageLimitsActive(provider, ignoreUsageLimits) && isUsageLimitRefusal(ue) {
+		log.Info("combo", "ignore usage limits, not locking the account",
 			"provider", provider, "model", model, "conn", connID, "status", ue.StatusCode)
 		return
 	}

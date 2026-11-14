@@ -57,6 +57,13 @@ func IsCustomCompatible(providerID string) bool {
 		strings.HasPrefix(s, CustomEmbeddingPrefix)
 }
 
+// IgnoreUsageLimitsActive reports whether a connection's ignoreUsageLimits
+// flag is honoured for providerID. The flag only applies to user-defined
+// compatible endpoints; on any other provider it is inert.
+func IgnoreUsageLimitsActive(providerID string, flag int) bool {
+	return flag == 1 && IsCustomCompatible(providerID)
+}
+
 // SectionCategory normalises a category to the section the dashboard renders it
 // under, so a caller counting cards per section does not need to know that
 // "free" is folded into "freeTier".

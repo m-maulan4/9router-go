@@ -260,7 +260,7 @@ func TestComboLockRetryable_OpencodeFreeUsageLimitDoesNotLock(t *testing.T) {
 
 	// 1. 429 FreeUsageLimitError must NOT lock the connection or the account.
 	var excludeIDs []string
-	h.comboLockRetryable(context.Background(), &excludeIDs, "conn-open", "opencode", "deepseek-v4.1-flash-free", &upstreamError{
+	h.comboLockRetryable(context.Background(), &excludeIDs, "conn-open", "opencode", "deepseek-v4.1-flash-free", 0, &upstreamError{
 		StatusCode: http.StatusTooManyRequests,
 		Body:       []byte(`{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}`),
 	})
@@ -280,7 +280,7 @@ func TestComboLockRetryable_OpencodeFreeUsageLimitDoesNotLock(t *testing.T) {
 	// 2. A genuine rate-limit 429 from the same provider still locks
 	// (regression guard: the refusal token set must not silently widen).
 	var excludeIDs2 []string
-	h.comboLockRetryable(context.Background(), &excludeIDs2, "conn-open", "opencode", "deepseek-v4.1-flash-free", &upstreamError{
+	h.comboLockRetryable(context.Background(), &excludeIDs2, "conn-open", "opencode", "deepseek-v4.1-flash-free", 0, &upstreamError{
 		StatusCode: http.StatusTooManyRequests,
 		Body:       []byte(`{"error":{"type":"RateLimitError","message":"too many requests"}}`),
 	})

@@ -1439,6 +1439,16 @@
     }
   }
 
+  async function toggleIgnoreUsageLimits(conn: ProviderConnection) {
+    const next = !conn.ignoreUsageLimits
+    try {
+      await api.updateConnection(conn.id, { ignoreUsageLimits: next })
+      onRefresh()
+    } catch (err) {
+      alert(`Toggle failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   async function handleDeleteConnection(conn: ProviderConnection) {
     if (!confirm(`Delete connection "${formatEmailLabel(conn.name || conn.id, $emailPrivacy)}"? This cannot be undone.`)) return
     try {
@@ -4063,6 +4073,15 @@
                       <span class="inline-flex items-center gap-1.5 rounded-full font-semibold bg-surface-2 text-text-muted px-2 py-0.5 text-[10px]">
                         {conn.authType === 'oauth' ? 'OAuth' : 'API Key'}
                       </span>
+                      {#if isCompatibleNode && conn.ignoreUsageLimits}
+                        <span
+                          class="inline-flex items-center gap-1 rounded-full font-semibold px-2 py-0.5 text-[10px] bg-brand-500/10 text-primary"
+                          title="Ignore usage limits: 402/429 quota refusals never park this account — it keeps retrying every 10s until the client disconnects. Ban risk to the upstream node."
+                        >
+                          <span class="material-symbols-outlined text-[12px]">all_inclusive</span>
+                          Unlimited
+                        </span>
+                      {/if}
                       <!-- Freebuff Session status badge -->
                       {#if isFreebuff}
                         {@const fbSess = freebuffSessions[conn.id]}
@@ -4292,6 +4311,18 @@
                       {/if}
 
                       <div class="my-1 border-t border-border-subtle" role="separator"></div>
+
+                      {#if isCompatibleNode && conn.authType !== 'oauth'}
+                        <MenuItem
+                          label="Ignore usage limits"
+                          icon="all_inclusive"
+                          checkbox
+                          pressed={!!conn.ignoreUsageLimits}
+                          note={conn.ignoreUsageLimits ? 'Retry 10s until client leaves' : 'Never park on 402/429'}
+                          onSelect={() => toggleIgnoreUsageLimits(conn)}
+                        />
+                        <div class="my-1 border-t border-border-subtle" role="separator"></div>
+                      {/if}
 
                       <MenuItem label="Delete" icon="delete" danger onSelect={() => handleDeleteConnection(conn)} />
                     </Menu>

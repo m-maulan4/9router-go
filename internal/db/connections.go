@@ -13,7 +13,7 @@ import (
 // providerConnectionColumns is the single column list every connection read
 // selects, so a schema addition lands in one place instead of three literals
 // that have to stay in step by hand.
-const providerConnectionColumns = `id, provider, authType, name, email, priority, isActive, data, lastUsedAt, consecutiveUseCount, createdAt, updatedAt`
+const providerConnectionColumns = `id, provider, authType, name, email, priority, isActive, data, lastUsedAt, consecutiveUseCount, createdAt, updatedAt, ignoreUsageLimits`
 
 // connectionSortOrder mirrors the JavaScript ordering: rows with no priority sort
 // last, ties break on the most recently updated row.
@@ -26,7 +26,7 @@ func scanConnection(scan func(dest ...any) error, conn *models.ProviderConnectio
 	return scan(
 		&conn.ID, &conn.Provider, &conn.AuthType, &conn.Name, &conn.Email,
 		&conn.Priority, &conn.IsActive, &conn.Data, &conn.LastUsedAt, &conn.ConsecutiveUseCount,
-		&conn.CreatedAt, &conn.UpdatedAt,
+		&conn.CreatedAt, &conn.UpdatedAt, &conn.IgnoreUsageLimits,
 	)
 }
 
@@ -138,7 +138,7 @@ func (r *Repo) GetProviderConnectionByName(provider, authType, name string) (*mo
 		provider, authType, name,
 	).Scan(&conn.ID, &conn.Provider, &conn.AuthType, &conn.Name, &conn.Email,
 		&conn.Priority, &conn.IsActive, &conn.Data, &conn.LastUsedAt, &conn.ConsecutiveUseCount,
-		&conn.CreatedAt, &conn.UpdatedAt)
+		&conn.CreatedAt, &conn.UpdatedAt, &conn.IgnoreUsageLimits)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

@@ -267,6 +267,20 @@ func (h *ChatHandler) handleAccountFallback(
 		if isCustomJSONConn(connData) {
 			return lastErr
 		}
+		// PRD: Ignore Usage Limits. An operator-marked custom account never
+		// parks on a 402/429 quota refusal: skip every lock, exclude and
+		// eviction below and retry the flag-ON accounts every 10s until the
+		// client disconnects. Checked after the providerLimitRefusal and
+		// isCustomJSONConn branches, which take precedence (PRD §4/§9).
+		var iulErr *upstreamError
+		if errors.As(lastErr, &iulErr) && providers.IgnoreUsageLimitsActive(provider, connObj.IgnoreUsageLimits) && isUsageLimitRefusal(iulErr) {
+			return h.retryUsageLimitForever(ctx, forwardRequestParams{
+				Ctx: ctx, W: w, Provider: provider, Model: model,
+				ConnectionID: connObj.ID, ConnName: connObjName(connObj), ConnEmail: connObjEmail(connObj),
+				ConnData: connData, Body: body, Attempts: attemptCount(ctx),
+				IsStream: isStream, TranslateResponse: translateResponse, Endpoint: endpoint,
+			}, allConns, connObj)
+		}
 
 		var ue *upstreamError
 		if errors.As(lastErr, &ue) && providers.IsModelDeprecation(ue.StatusCode, ue.Body) {

@@ -4,6 +4,7 @@ import (
 	"9router/proxy/internal/connlimit"
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/updater"
@@ -297,6 +298,7 @@ func sanitizeProviderConnection(c *models.ProviderConnection) map[string]any {
 	safe := map[string]any{
 		"id": c.ID, "provider": c.Provider, "authType": c.AuthType,
 		"isActive": c.IsActive, "createdAt": c.CreatedAt, "updatedAt": c.UpdatedAt,
+		"ignoreUsageLimits": c.IgnoreUsageLimits,
 	}
 	if c.Name != nil {
 		safe["name"] = maskConnectionName(*c.Name)
@@ -430,6 +432,8 @@ type createConnectionRequest struct {
 	// inserted for the same account.
 	Replace                bool `json:"replace"`
 	AllowPrivateNetworking bool `json:"allowPrivateNetworking"`
+	// PRD: Ignore Usage Limits. Only honoured on compatible-node providers.
+	IgnoreUsageLimits bool `json:"ignoreUsageLimits"`
 }
 
 // isCompatibleNodeProviderID reports whether providerID names a custom
@@ -652,6 +656,16 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 	if err := h.Repo.CreateProviderConnectionFull(req.ID, req.Provider, req.AuthType, name, req.Priority, dataStr); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if req.IgnoreUsageLimits {
+		if !isCompatibleNodeProviderID(req.Provider) {
+			log.Warn("dashboard", "ignoreUsageLimits ignored: not a compatible node provider",
+				"provider", req.Provider, "conn", req.ID)
+		} else if err := h.Repo.SetConnectionIgnoreUsageLimits(req.ID, true); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
@@ -933,6 +947,25 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	if err := h.Repo.UpdateProviderConnection(id, name, priority, isActive, dataStr); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// PRD: Ignore Usage Limits. Toggled on its own column, not inside the data
+	// blob, and only honoured on compatible-node providers — anywhere else the
+	// flag is forced off (PRD §7).
+	_, hasIgnoreUsage := rawBody["ignoreUsageLimits"]
+	if hasIgnoreUsage {
+		on := false
+		if v, ok := rawBody["ignoreUsageLimits"].(bool); ok && v {
+			on = true
+		}
+		if on && !isCompatibleNodeProviderID(existing.Provider) {
+			log.Warn("dashboard", "ignoreUsageLimits forced off: not a compatible node provider",
+				"provider", existing.Provider, "conn", id)
+			on = false
+		}
+		if err := h.Repo.SetConnectionIgnoreUsageLimits(id, on); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if hasIsActive && a {
 		chat.ClearCodexQuotaBlock(id)

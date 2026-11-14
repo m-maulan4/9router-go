@@ -35,6 +35,10 @@ type ProviderConnection struct {
 	ConsecutiveUseCount *int    `json:"consecutiveUseCount,omitempty"`
 	CreatedAt           string  `json:"createdAt"`
 	UpdatedAt           string  `json:"updatedAt"`
+	// IgnoreUsageLimits marks an account that must never be parked on a 402/429
+	// quota/credit refusal: the executor keeps retrying it instead of locking
+	// the model or account. Only meaningful for custom-compatible providers.
+	IgnoreUsageLimits int `json:"ignoreUsageLimits"` // 0 or 1
 }
 
 // ProviderNode represents a deployment node / executor config.

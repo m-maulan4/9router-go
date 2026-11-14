@@ -355,6 +355,8 @@ func coreSchema() []tableDef {
 var goOnlyColumns = [][3]string{
 	{"providerConnections", "lastUsedAt", "TEXT"},
 	{"providerConnections", "consecutiveUseCount", "INTEGER DEFAULT 0"},
+	// PRD: Ignore Usage Limits — custom-provider flag-ON never parks on 402/429.
+	{"providerConnections", "ignoreUsageLimits", "INTEGER NOT NULL DEFAULT 0"},
 	// F-5 Credential Vault: sealed credential columns
 	{"providerConnections", "secretWrappedDEK", "TEXT DEFAULT ''"},
 	{"providerConnections", "secretCiphertext", "TEXT DEFAULT ''"},

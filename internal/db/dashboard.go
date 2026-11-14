@@ -84,6 +84,25 @@ func (r *Repo) SetConnectionStatus(id string, isActive bool) error {
 	return nil
 }
 
+// SetConnectionIgnoreUsageLimits flips the ignoreUsageLimits flag (0/1) of a
+// provider connection. Standalone so the chat/media paths that share
+// UpdateProviderConnection never have to re-serialize a `data` payload they
+// did not touch.
+func (r *Repo) SetConnectionIgnoreUsageLimits(id string, on bool) error {
+	flag := 0
+	if on {
+		flag = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := r.db.Exec(
+		`UPDATE providerConnections SET ignoreUsageLimits = ?, updatedAt = ? WHERE id = ?`,
+		flag, now, id,
+	); err != nil {
+		return fmt.Errorf("set connection ignore usage limits %s: %w", id, err)
+	}
+	return nil
+}
+
 // SetConnectionPriority updates the priority and updatedAt of a provider connection.
 func (r *Repo) SetConnectionPriority(id string, priority int) error {
 	now := time.Now().UTC().Format(time.RFC3339)

@@ -25,6 +25,7 @@ export interface ProviderConnection {
   email: string | null
   priority: number | null
   isActive: number // 1 or 0
+  ignoreUsageLimits?: number // 0 or 1 — custom-compatible nodes only
   data: string // JSON string
   createdAt: string
   updatedAt: string
