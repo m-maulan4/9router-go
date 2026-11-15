@@ -4076,10 +4076,9 @@
                       {#if isCompatibleNode && conn.ignoreUsageLimits}
                         <span
                           class="inline-flex items-center gap-1 rounded-full font-semibold px-2 py-0.5 text-[10px] bg-brand-500/10 text-primary"
-                          title="Ignore usage limits: 402/429 quota refusals never park this account — it keeps retrying every 10s until the client disconnects. Ban risk to the upstream node."
+                          title="Never park on 402/429: a quota refusal leaves this account unlocked, and the request retries every 10s until the client disconnects. The upstream quota itself is unchanged — ban risk to the node."
                         >
-                          <span class="material-symbols-outlined text-[12px]">all_inclusive</span>
-                          Unlimited
+                          No Park
                         </span>
                       {/if}
                       <!-- Freebuff Session status badge -->
@@ -4314,11 +4313,11 @@
 
                       {#if isCompatibleNode && conn.authType !== 'oauth'}
                         <MenuItem
-                          label="Ignore usage limits"
+                          label="Never park on 402/429"
                           icon="all_inclusive"
                           checkbox
                           pressed={!!conn.ignoreUsageLimits}
-                          note={conn.ignoreUsageLimits ? 'Retry 10s until client leaves' : 'Never park on 402/429'}
+                          note={conn.ignoreUsageLimits ? 'Retry 10s until client leaves' : 'Park on quota refusal'}
                           onSelect={() => toggleIgnoreUsageLimits(conn)}
                         />
                         <div class="my-1 border-t border-border-subtle" role="separator"></div>

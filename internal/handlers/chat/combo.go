@@ -1211,7 +1211,11 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 						}
 						h.recordModelCooldown(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							flag := 0
+							if picked != nil {
+								flag = picked.IgnoreUsageLimits
+							}
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, flag, ue)
 						}
 						retry.note(ue)
 						lastErr = ue
@@ -1710,7 +1714,11 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 						}
 						h.recordModelCooldown(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
 						if providers.RetryableStatusCodes[ue.StatusCode] {
-							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+							flag := 0
+							if picked != nil {
+								flag = picked.IgnoreUsageLimits
+							}
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, flag, ue)
 						}
 						retry.note(ue)
 						lastErr = ue
