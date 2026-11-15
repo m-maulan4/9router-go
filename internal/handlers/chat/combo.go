@@ -20,6 +20,7 @@ import (
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
 	internalproxy "9router/proxy/internal/proxy"
+	"9router/proxy/internal/tokensaver"
 	"9router/proxy/internal/translator"
 )
 
@@ -919,6 +920,20 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 	if FallbackAttemptRecorderFrom(ctx) == nil {
 		ctx = WithFallbackAttemptRecorder(ctx, NewFallbackAttemptRecorder())
 	}
+	// Inject the combo's own custom system prompt before any model attempt, so
+	// every member of the combo carries the same operator instructions. When
+	// set, the global system prompt prefix/suffix is skipped for this request
+	// (the combo prompt replaces it, it does not stack on top).
+	// handleComboFallback serves /v1/chat/completions, so the body is OpenAI
+	// format: inject into messages[] with claudeNative=false.
+	if h.Repo != nil && comboName != "" {
+		if combo, err := h.Repo.GetComboByName(comboName); err == nil && combo != nil && combo.CustomPrompt != "" {
+			if next, did := tokensaver.InjectPrefixSystemPrompt(body, combo.CustomPrompt, false); did {
+				body = next
+				ctx = WithComboCustomPrompt(ctx)
+			}
+		}
+	}
 	cw := newCommittedResponseWriter(w)
 	cw.stream = isStream
 	cw.responsesClient = translator.IsResponsesClient(ctx)
@@ -930,6 +945,10 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 	// noReplay ends the turn after a custom JSON business attempt, whose
 	// operation must never be repeated against another connection or model.
 	var noReplay bool
+	// inbandError records that the current candidate committed a
+	// provider-injected in-band error frame. The chain must stop: no failover
+	// to subsequent models, no retry pass.
+	var inbandError bool
 	var retry passRetry
 	responseTimeout, timeoutGrace := h.comboTimeoutPolicy(comboName)
 	modelTimedOut := false
@@ -1015,7 +1034,7 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 			isLastModel := i == lastTried.index(excludeIDs)
 
 			// Skip unavailable (model-locked) providers
-			if !h.Repo.IsProviderAvailable(modelInfo.Provider, modelInfo.Model) {
+			if !h.Repo.IsProviderAvailable(ctx, modelInfo.Provider, modelInfo.Model) {
 				log.Warn("combo", "skip unhealthy", "provider", modelInfo.Provider, "model", modelInfo.Model)
 				if lastErr == nil {
 					lastErr = &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(`{"error":{"message":"all connections for this provider are rate-limited","type":"rate_limit_error","code":429}}`)}
@@ -1088,16 +1107,18 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 					connID = picked.ID
 					connData = cData
 				}
-				// Skip a connection that is already locked for this model
-				if connID != "" {
+				// Skip a connection that is already locked for this model.
+				// picked.Data is already in memory — the repo call re-fetched
+				// and re-parsed the same row per connection attempt.
+				if picked != nil {
 					lockKey := canonicalLockModel(modelInfo.Provider, modelInfo.Model)
-					locked, _ := h.Repo.IsConnectionModelLocked(connID, lockKey)
+					locked := db.ConnectionModelLockedData(picked.Data, lockKey)
 					if !locked && lockKey != modelInfo.Model {
-						locked, _ = h.Repo.IsConnectionModelLocked(connID, modelInfo.Model)
+						locked = db.ConnectionModelLockedData(picked.Data, modelInfo.Model)
 					}
 					if locked {
-						log.Warn("combo", "skip locked connection", "provider", modelInfo.Provider, "model", modelInfo.Model, "lockKey", lockKey, "conn", connID)
-						excludeIDs = append(excludeIDs, connID)
+						log.Warn("combo", "skip locked connection", "provider", modelInfo.Provider, "model", modelInfo.Model, "lockKey", lockKey, "conn", picked.ID)
+						excludeIDs = append(excludeIDs, picked.ID)
 						continue
 					}
 				}
@@ -1156,9 +1177,11 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 				if timeoutGate != nil && timeoutGate.timedOut() && ctx.Err() == nil {
 					fwdErr = context.DeadlineExceeded
 				}
-				if streamPeeker != nil && fwdErr == nil {
+				if streamPeeker != nil {
 					if finishErr := streamPeeker.Finish(); finishErr != nil {
-						fwdErr = finishErr
+						if fwdErr == nil || errors.Is(finishErr, internalproxy.ErrStreamingInbandError) {
+							fwdErr = finishErr
+						}
 					}
 				}
 				RecordAttemptFromContext(ctx, connID, connObjName(picked), modelInfo.Provider, modelInfo.Model, 0, fwdErr, time.Since(attemptStart).Milliseconds())
@@ -1170,6 +1193,29 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 					if timeoutGate != nil && timeoutGate.timedOut() && ctx.Err() == nil {
 						log.Warn("combo", "model response timeout, falling back to next model", "provider", modelInfo.Provider, "model", modelInfo.Model)
 						lastErr = comboTimeoutError()
+						break
+					}
+					if errors.Is(fwdErr, internalproxy.ErrStreamingInbandError) {
+						// A provider-injected in-band error is an explicit
+						// failure signal. The peeker already committed the
+						// error frame to the client, so stop the chain and
+						// do not fail over to the next combo member.
+						log.Warn("combo", "in-band upstream error, stopping chain, no failover",
+							"provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connID)
+						var ue *upstreamError
+						if !errors.As(fwdErr, &ue) {
+							ue = &upstreamError{
+								StatusCode: http.StatusBadGateway,
+								Body:       upstreamErrorBody(fwdErr.Error()),
+							}
+						}
+						h.recordModelCooldown(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+						if providers.RetryableStatusCodes[ue.StatusCode] {
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+						}
+						retry.note(ue)
+						lastErr = ue
+						inbandError = true
 						break
 					}
 					if errors.Is(fwdErr, internalproxy.ErrStreamingZeroContent) {
@@ -1303,6 +1349,9 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 			if !entrySuccess {
 				h.clearFailedSmartSticky(ctx, entry)
 			}
+			if inbandError {
+				break
+			}
 			if entrySuccess || ctx.Err() != nil {
 				return
 			}
@@ -1319,7 +1368,7 @@ func (h *ChatHandler) handleComboFallbackWithVisited(ctx context.Context, cw *co
 
 		// All entries failed. Retry once only if a bounded wait is available;
 		// otherwise fall through to the error response below.
-		if lastErr == nil || ctx.Err() != nil || attempt == 1 || modelTimedOut {
+		if lastErr == nil || ctx.Err() != nil || attempt == 1 || modelTimedOut || inbandError {
 			break
 		}
 	}
@@ -1408,6 +1457,24 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 	if FallbackAttemptRecorderFrom(ctx) == nil {
 		ctx = WithFallbackAttemptRecorder(ctx, NewFallbackAttemptRecorder())
 	}
+	// Inject the combo's own custom system prompt before any model attempt, so
+	// every member of the combo carries the same operator instructions. When
+	// set, the global system prompt prefix/suffix is skipped for this request
+	// (the combo prompt replaces it, it does not stack on top).
+	// Messages-endpoint bodies may be Claude-native (top-level system field)
+	// or OpenAI-format (messages array), so detect from the body shape.
+	claudeNative := translatedReq["system"] != nil
+	if h.Repo != nil && comboName != "" {
+		if combo, err := h.Repo.GetComboByName(comboName); err == nil && combo != nil && combo.CustomPrompt != "" {
+			body, err := json.Marshal(translatedReq)
+			if err == nil {
+				if next, did := tokensaver.InjectPrefixSystemPrompt(body, combo.CustomPrompt, claudeNative); did {
+					_ = json.Unmarshal(next, &translatedReq)
+					ctx = WithComboCustomPrompt(ctx)
+				}
+			}
+		}
+	}
 	cw := newCommittedResponseWriter(w)
 	cw.stream = isStream
 	cw.responsesClient = translator.IsResponsesClient(ctx)
@@ -1419,6 +1486,10 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 	// noReplay ends the turn after a custom JSON business attempt, whose
 	// operation must never be repeated against another connection or model.
 	var noReplay bool
+	// inbandError records that the current candidate committed a
+	// provider-injected in-band error frame. The chain must stop: no failover
+	// to subsequent models, no retry pass.
+	var inbandError bool
 	var retry passRetry
 	responseTimeout, timeoutGrace := h.comboTimeoutPolicy(comboName)
 	modelTimedOut := false
@@ -1485,7 +1556,7 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 			isLastModel := i == lastTried.index(excludeIDs)
 
 			// Skip unavailable (model-locked) providers
-			if !h.Repo.IsProviderAvailable(modelInfo.Provider, modelInfo.Model) {
+			if !h.Repo.IsProviderAvailable(ctx, modelInfo.Provider, modelInfo.Model) {
 				log.Warn("combo", "skip unhealthy", "provider", modelInfo.Provider, "model", modelInfo.Model)
 				if lastErr == nil {
 					lastErr = &upstreamError{StatusCode: http.StatusTooManyRequests, Body: []byte(`{"error":{"message":"all connections for this provider are rate-limited","type":"rate_limit_error","code":429}}`)}
@@ -1538,15 +1609,17 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 					connID = picked.ID
 					connData = cData
 				}
-				if connID != "" {
+				// Skip a connection already locked for this model, reading the
+				// blob picked already carries — same rationale as the chat loop.
+				if picked != nil {
 					lockKey := canonicalLockModel(modelInfo.Provider, modelInfo.Model)
-					locked, _ := h.Repo.IsConnectionModelLocked(connID, lockKey)
+					locked := db.ConnectionModelLockedData(picked.Data, lockKey)
 					if !locked && lockKey != modelInfo.Model {
-						locked, _ = h.Repo.IsConnectionModelLocked(connID, modelInfo.Model)
+						locked = db.ConnectionModelLockedData(picked.Data, modelInfo.Model)
 					}
 					if locked {
-						log.Warn("combo", "skip locked connection", "provider", modelInfo.Provider, "model", modelInfo.Model, "lockKey", lockKey, "conn", connID)
-						excludeIDs = append(excludeIDs, connID)
+						log.Warn("combo", "skip locked connection", "provider", modelInfo.Provider, "model", modelInfo.Model, "lockKey", lockKey, "conn", picked.ID)
+						excludeIDs = append(excludeIDs, picked.ID)
 						continue
 					}
 				}
@@ -1603,9 +1676,11 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 				if timeoutGate != nil && timeoutGate.timedOut() && ctx.Err() == nil {
 					fwdErr = context.DeadlineExceeded
 				}
-				if streamPeeker != nil && fwdErr == nil {
+				if streamPeeker != nil {
 					if finishErr := streamPeeker.Finish(); finishErr != nil {
-						fwdErr = finishErr
+						if fwdErr == nil || errors.Is(finishErr, internalproxy.ErrStreamingInbandError) {
+							fwdErr = finishErr
+						}
 					}
 				}
 				RecordAttemptFromContext(ctx, connID, connObjName(picked), modelInfo.Provider, modelInfo.Model, 0, fwdErr, time.Since(attemptStart).Milliseconds())
@@ -1617,6 +1692,29 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 					if timeoutGate != nil && timeoutGate.timedOut() && ctx.Err() == nil {
 						log.Warn("combo", "model response timeout, falling back to next model", "provider", modelInfo.Provider, "model", modelInfo.Model)
 						lastErr = comboTimeoutError()
+						break
+					}
+					if errors.Is(fwdErr, internalproxy.ErrStreamingInbandError) {
+						// A provider-injected in-band error is an explicit
+						// failure signal. The peeker already committed the
+						// error frame to the client, so stop the chain and
+						// do not fail over to the next combo member.
+						log.Warn("combo", "in-band upstream error, stopping chain, no failover",
+							"provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connID)
+						var ue *upstreamError
+						if !errors.As(fwdErr, &ue) {
+							ue = &upstreamError{
+								StatusCode: http.StatusBadGateway,
+								Body:       upstreamErrorBody(fwdErr.Error()),
+							}
+						}
+						h.recordModelCooldown(ctx, modelInfo.Provider, modelInfo.Model, connID, ue)
+						if providers.RetryableStatusCodes[ue.StatusCode] {
+							h.comboLockRetryable(ctx, &excludeIDs, connID, modelInfo.Provider, modelInfo.Model, ue)
+						}
+						retry.note(ue)
+						lastErr = ue
+						inbandError = true
 						break
 					}
 					if errors.Is(fwdErr, internalproxy.ErrStreamingZeroContent) {
@@ -1741,6 +1839,9 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 			if !entrySuccess {
 				h.clearFailedSmartSticky(ctx, entry)
 			}
+			if inbandError {
+				break
+			}
 			if entrySuccess || ctx.Err() != nil {
 				return
 			}
@@ -1755,7 +1856,7 @@ func (h *ChatHandler) handleMessagesComboFallbackWithVisited(ctx context.Context
 
 		// All entries failed. Retry once only if a bounded wait is available;
 		// otherwise fall through to the error response below.
-		if lastErr == nil || ctx.Err() != nil || attempt == 1 || modelTimedOut {
+		if lastErr == nil || ctx.Err() != nil || attempt == 1 || modelTimedOut || inbandError {
 			break
 		}
 	}
