@@ -1,5 +1,32 @@
 # Changelog
 
+## [v1.9.17-exp.4.1] - 2026-11-15
+
+### Ignore Usage Limits untuk custom provider node
+
+- Fitur baru (PRD `docs/ignore-usage-limits-prd.md`): operator dapat menandai
+  account provider node user-defined (`openai-compatible-*`,
+  `anthropic-compatible-*`, `custom-embedding-*`) lewat `ignoreUsageLimits`.
+- Account flag-ON tidak pernah diparkir pada refusal quota/credit: `402`/`429`
+  tidak menulis `rateLimitedUntil`/`accountLockedUntil`/model lock, tidak
+  `excludeIDs`, tidak evict — request terus retry tiap 10s (fixed) sampai client
+  disconnect (`ctx.Done()`).
+- `>=2` account flag-ON → rotasi round-robin per percobaan (A→B→A).
+- Kolom `providerConnections.ignoreUsageLimits` (INTEGER, default 0, no
+  backfill) disinkron di `goOnlyColumns`, `providerConnectionColumns`,
+  `scanConnection`.
+- Combo: hanya `comboLockRetryable` berubah — flagged connection pada
+  402/429 tidak di-lock/di-exclude; timing combo tidak disentuh (Opsi A).
+- Ledger fallback-attempt di-throttle: 1 row/menit per request + row final.
+- Dashboard: `ignoreUsageLimits` hanya berlaku untuk compatible node; provider
+  registry dipaksa 0 + `log.Warn`, bukan 400. `SetConnectionIgnoreUsageLimits`
+  menulis kolom tanpa menyentuh blob `data`. Toggle ada di menu actions
+  per-connection (checkbox `MenuItem`), hanya tampil untuk compatible node
+  non-OAuth.
+- Diuji: gate `IgnoreUsageLimitsActive`/`isUsageLimitRefusal` (table-driven),
+  rotator alternasi, retry loop (survive 402→sukses + no-lock, stop ctx cancel,
+  ledger throttle), dan dashboard create/update guard.
+
 ## [v1.9.17-exp.4] - 2026-11-15
 
 ### fix(deepseek-web): bound the compiled-schema cache
